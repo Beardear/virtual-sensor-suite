@@ -1,0 +1,46 @@
+# Generated outputs
+output/
+output_*/
+*.mp4
+
+# Temporary test files
+test_*.png
+neurad_frame_*.png
+
+# KITTI derived data files
+kitti_0006_*.txt
+dataparser_transform.txt
+
+# One-off scripts
+make_kitti_vis_frames.py
+make_synthetic_vis_frames.py
+render_fusion_video.py
+run_vv_kitti.py
+run_vv_kitti_eval.py
+
+# Session log (internal)
+session_log.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+Documents/jd.txt
