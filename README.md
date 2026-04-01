@@ -4,6 +4,21 @@
 
 Renders synchronized Camera and LiDAR streams from arbitrary ego poses through a pre-trained 3DGS scene, with Monte Carlo ray-drop modeling, automated V&V metrics, and sensor fusion visualization.
 
+### Real KITTI Data — Camera + LiDAR Fusion (SplatAD, 5M Gaussians)
+<p align="center">
+  <img src="assets/kitti_fusion_demo.gif" alt="KITTI Camera + LiDAR Fusion Demo" width="800">
+</p>
+
+> 4-panel view: Camera RGB | LiDAR→Camera overlay | LiDAR BEV (height) | LiDAR BEV (intensity)
+> Trained on KITTI MOT sequence 0006 (270 frames). V&V: 6.6cm MAE on held-out frames.
+
+### Synthetic Scene — Dual Camera + Monte Carlo LiDAR
+<p align="center">
+  <img src="assets/synthetic_demo.gif" alt="Synthetic Sensor Suite Demo" width="620">
+</p>
+
+> Pure-Python 3DGS renderer with stochastic ray-drop modeling. No training data needed.
+
 ---
 
 ## Architecture
