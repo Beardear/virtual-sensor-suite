@@ -2,7 +2,31 @@
 
 **Probabilistic, config-driven sensor simulation engine built on 3D Gaussian Splatting.**
 
-Renders synchronized Camera and LiDAR streams from arbitrary ego poses through a pre-trained 3DGS scene, with Monte Carlo ray-drop modeling, automated V&V metrics, and sensor fusion visualization.
+Renders synchronized Camera, LiDAR, and Radar streams from arbitrary ego poses through a pre-trained 3DGS scene, with dynamic actor injection, Doppler velocity simulation, Monte Carlo ray-drop modeling, automated V&V metrics, and sensor fusion visualization.
+
+### Radar + Dynamic Actors — Multi-Sensor Fusion with Doppler Velocity
+<p align="center">
+  <img src="assets/radar_actor_multi_panel.gif" alt="Radar + Dynamic Actors Multi-Panel Demo" width="800">
+</p>
+
+> 4-panel view: Camera RGB | Depth map | LiDAR + Radar → Camera fusion | BEV with radar (diamond markers).
+> 6 surround radars, 4 dynamic actors (oncoming car, lead car, parked car, crossing pedestrian) injected via SE(3) transforms.
+
+### Radar Doppler Velocity — Bird's Eye View
+<p align="center">
+  <img src="assets/radar_doppler_bev.gif" alt="Radar Doppler BEV Demo" width="500">
+</p>
+
+> Diverging colormap (RdBu): red = approaching, blue = receding. Oncoming vehicle shows ~25 m/s closing speed. Background velocity from ego motion at 10 m/s.
+
+### Radar Doppler Velocity — Camera Overlay
+<p align="center">
+  <img src="assets/radar_doppler_camera.gif" alt="Radar Doppler Camera Overlay Demo" width="800">
+</p>
+
+> Radar detections projected onto front camera, colored by radial velocity. Diamond markers distinguish radar from LiDAR.
+
+---
 
 ### Real KITTI Data — Camera + LiDAR Fusion (SplatAD, 5M Gaussians)
 <p align="center">
@@ -26,18 +50,21 @@ Renders synchronized Camera and LiDAR streams from arbitrary ego poses through a
 ```
 virtual-sensor-suite/
 ├── configs/
-│   └── kitti_rig.yaml              # Sensor layout (camera, LiDAR, radar placeholder)
+│   ├── kitti_rig.yaml              # Sensor layout (camera, LiDAR, 6 surround radars)
+│   └── scenario_demo.yaml          # Dynamic actor scenario (vehicles, pedestrians)
 ├── engine/
 │   ├── sensor_rig.py               # VirtualSensorRig: config-driven multi-sensor orchestrator
 │   ├── camera.py                   # 3DGS camera renderer (novel view synthesis)
 │   ├── lidar.py                    # Monte Carlo ray-casting LiDAR with ray_drop_prob
+│   ├── radar.py                    # 3DGS ray-casting radar with RCS and Doppler velocity
+│   ├── actor.py                    # Dynamic actor injection (rigid-body SE(3) transforms)
 │   ├── neurad_backend.py           # NeuRAD/SplatAD CUDA rendering backend (camera + LiDAR)
 │   └── trajectory.py               # Trajectory loader (timestamped SE(3) poses)
 ├── metrics/
 │   ├── depth_error.py              # L1 / MAE / RMSE / delta depth metrics
 │   └── frustum_validation.py       # Frustum-culled V&V comparison
 ├── visualization/
-│   └── fusion_overlay.py           # LiDAR→Camera overlay, BEV, depth comparison, ray drop heatmap
+│   └── fusion_overlay.py           # Multi-sensor fusion overlays, BEV, Doppler velocity maps
 ├── demo.py                         # CLI entry point (synthetic scenes)
 └── demo_neurad.py                  # CLI entry point (trained SplatAD model)
 ```

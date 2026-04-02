@@ -21,6 +21,12 @@ run_vv_kitti_eval.py
 # Session log (internal)
 session_log.md
 
+# Claude Code (local only)
+.claude/
+
+# Local docs (not published)
+docs/
+
 # Python
 __pycache__/
 *.pyc
