@@ -40,6 +40,7 @@ from engine.camera import GaussianSplatScene, VirtualCamera, CameraIntrinsics
 from engine.lidar import VirtualLiDAR
 from engine.sensor_rig import VirtualSensorRig
 from engine.trajectory import Trajectory, Pose
+from engine.actor import ScenarioManager
 from metrics.depth_error import DepthErrorMetric
 from metrics.frustum_validation import FrustumValidator, FrustumParams
 from visualization.fusion_overlay import FusionOverlay
@@ -113,6 +114,18 @@ def parse_args():
     sim_group.add_argument(
         "--no-lidar", action="store_true",
         help="Skip LiDAR rendering",
+    )
+    sim_group.add_argument(
+        "--no-radar", action="store_true",
+        help="Skip radar rendering",
+    )
+    sim_group.add_argument(
+        "--scenario", type=str, default=None,
+        help="Path to scenario YAML with dynamic actors",
+    )
+    sim_group.add_argument(
+        "--auto-traffic", type=int, default=None,
+        help="Auto-generate N vehicles with random trajectories",
     )
     sim_group.add_argument(
         "--deterministic", action="store_true",
@@ -292,6 +305,38 @@ def run_benchmark(rig: VirtualSensorRig, trajectory: Trajectory, args):
         print(f"    Stochastic (p_drop={args.ray_drop_prob}):")
         print(f"      Mean:  {times_stoch.mean():.1f} ms  |  FPS: {1000.0 / times_stoch.mean():.1f}")
 
+    # Radar benchmark
+    if not args.no_radar and rig.radars:
+        radar = list(rig.radars.values())[0]
+        print(f"\n  Radar: {radar.config.name} ({radar.config.num_azimuth_bins}az × "
+              f"{radar.config.num_elevation_bins}el, "
+              f"{radar.config.num_azimuth_bins * radar.config.num_elevation_bins} rays)")
+
+        # Warmup
+        for _ in range(args.warmup):
+            radar.render(pose.T)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        times = []
+        n_bench = max(args.n_frames, 10)
+        for i in range(n_bench):
+            t_pose = trajectory[i % len(trajectory)]
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            radar.render(t_pose.T)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            times.append((time.perf_counter() - t0) * 1000)
+
+        times = np.array(times)
+        print(f"    Mean:   {times.mean():.1f} ms")
+        print(f"    Std:    {times.std():.1f} ms")
+        print(f"    Min:    {times.min():.1f} ms")
+        print(f"    Max:    {times.max():.1f} ms")
+        print(f"    FPS:    {1000.0 / times.mean():.1f}")
+
     print("\n" + "=" * 64)
 
 
@@ -393,6 +438,24 @@ def run_visualization(frames, rig, args):
     for idx, frame in enumerate(frames[:3]):  # Visualize first 3 frames
         prefix = f"frame_{idx:04d}"
 
+        # Collect all radar points for this frame
+        all_radar_pts = []
+        all_radar_rcs = []
+        all_radar_vel = []
+        for so in frame.sensor_outputs.values():
+            if so.sensor_type == "radar" and so.data["n_valid_points"] > 0:
+                all_radar_pts.append(so.data["points"])
+                all_radar_rcs.append(so.data["rcs"])
+                all_radar_vel.append(so.data["radial_velocity"])
+        if all_radar_pts:
+            merged_radar_pts = np.concatenate(all_radar_pts, axis=0)
+            merged_radar_rcs = np.concatenate(all_radar_rcs, axis=0)
+            merged_radar_vel = np.concatenate(all_radar_vel, axis=0)
+        else:
+            merged_radar_pts = None
+            merged_radar_rcs = None
+            merged_radar_vel = None
+
         # Multi-panel visualization
         if cam_name and lidar_name:
             cam_out = frame.sensor_outputs.get(cam_name)
@@ -414,28 +477,67 @@ def run_visualization(frames, rig, args):
                     intrinsics=cam.intrinsics.K,
                     T_cam_world=viewmat,
                     ego_position=frame.ego_pose[:3, 3],
+                    radar_points=merged_radar_pts,
+                    radar_rcs=merged_radar_rcs,
                     output_path=str(out_dir / f"{prefix}_multi_panel.png"),
                 )
                 print(f"    Saved: {prefix}_multi_panel.png")
 
-                # Fusion overlay
+                # LiDAR fusion overlay
                 vis.overlay_lidar_on_image(
                     rgb_image=rgb,
                     lidar_points=points,
                     intrinsics=cam.intrinsics.K,
                     T_cam_lidar=viewmat,
-                    output_path=str(out_dir / f"{prefix}_fusion.png"),
+                    output_path=str(out_dir / f"{prefix}_fusion_lidar.png"),
                 )
-                print(f"    Saved: {prefix}_fusion.png")
+                print(f"    Saved: {prefix}_fusion_lidar.png")
 
-                # BEV
+                # Radar fusion overlay (RCS)
+                if merged_radar_pts is not None:
+                    vis.overlay_radar_on_image(
+                        rgb_image=rgb,
+                        radar_points=merged_radar_pts,
+                        intrinsics=cam.intrinsics.K,
+                        T_cam_radar=viewmat,
+                        radar_rcs=merged_radar_rcs,
+                        output_path=str(out_dir / f"{prefix}_fusion_radar_rcs.png"),
+                    )
+                    print(f"    Saved: {prefix}_fusion_radar_rcs.png")
+
+                    # Radar velocity overlay
+                    vis.overlay_radar_velocity_on_image(
+                        rgb_image=rgb,
+                        radar_points=merged_radar_pts,
+                        intrinsics=cam.intrinsics.K,
+                        T_cam_world=viewmat,
+                        radial_velocity=merged_radar_vel,
+                        output_path=str(out_dir / f"{prefix}_fusion_radar_velocity.png"),
+                    )
+                    print(f"    Saved: {prefix}_fusion_radar_velocity.png")
+
+                # BEV with radar (RCS)
                 vis.render_bev(
                     points=points,
                     intensity=intensity,
                     ego_position=frame.ego_pose[:3, 3],
+                    radar_points=merged_radar_pts,
+                    radar_rcs=merged_radar_rcs,
                     output_path=str(out_dir / f"{prefix}_bev.png"),
                 )
                 print(f"    Saved: {prefix}_bev.png")
+
+                # BEV with radar velocity
+                if merged_radar_pts is not None:
+                    vis.render_bev_velocity(
+                        lidar_points=points,
+                        lidar_intensity=intensity,
+                        radar_points=merged_radar_pts,
+                        radial_velocity=merged_radar_vel,
+                        ego_position=frame.ego_pose[:3, 3],
+                        output_path=str(out_dir / f"{prefix}_bev_velocity.png"),
+                    )
+                    print(f"    Saved: {prefix}_bev_velocity.png")
 
         elif cam_name:
             cam_out = frame.sensor_outputs.get(cam_name)
@@ -519,6 +621,23 @@ def main():
     rig = VirtualSensorRig.from_config(tmp_config, scene=scene)
     os.unlink(tmp_config)
 
+    # Load dynamic actors (scenario or auto-traffic)
+    scenario = None
+    if args.scenario:
+        scenario_path = Path(__file__).parent / args.scenario
+        print(f"  Loading scenario: {scenario_path}")
+        scenario = ScenarioManager.from_config(str(scenario_path), device=args.device)
+        print(f"  Scenario: {scenario}")
+    elif args.auto_traffic:
+        print(f"  Generating auto-traffic: {args.auto_traffic} vehicles")
+        scenario = ScenarioManager.generate_synthetic_traffic(
+            n_vehicles=args.auto_traffic, device=args.device,
+        )
+        print(f"  Scenario: {scenario}")
+
+    if scenario is not None:
+        rig.scenario = scenario
+
     print(f"  Sensor rig: {rig}")
     print()
 
@@ -536,6 +655,7 @@ def main():
         output_dir=str(out_dir),
         render_cameras=not args.no_camera,
         render_lidars=not args.no_lidar,
+        render_radars=not args.no_radar,
         lidar_stochastic=not args.deterministic,
         verbose=not args.quiet,
     )
@@ -565,8 +685,16 @@ def main():
         for s in f.sensor_outputs.values()
         if s.sensor_type == "lidar"
     )
+    total_radar = sum(
+        1 for f in frames
+        for s in f.sensor_outputs.values()
+        if s.sensor_type == "radar"
+    )
     print(f"  Camera renders: {total_cam}")
     print(f"  LiDAR renders:  {total_lidar}")
+    print(f"  Radar renders:  {total_radar}")
+    if scenario is not None:
+        print(f"  Dynamic actors: {scenario.n_actors} ({scenario.actor_names})")
     print("\nDone.")
 
 

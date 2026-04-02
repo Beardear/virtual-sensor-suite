@@ -139,6 +139,275 @@ class FusionOverlay:
 
         return overlay
 
+    def overlay_radar_on_image(
+        self,
+        rgb_image: np.ndarray,
+        radar_points: np.ndarray,
+        intrinsics: np.ndarray,
+        T_cam_radar: np.ndarray,
+        radar_rcs: Optional[np.ndarray] = None,
+        output_path: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        Project radar detections onto a camera image, colored by RCS.
+
+        Uses distinct diamond markers (larger than LiDAR dots) to
+        differentiate radar from LiDAR in combined visualizations.
+
+        Args:
+            rgb_image: (H, W, 3) uint8 camera image.
+            radar_points: (N, 3) radar points in world frame.
+            intrinsics: (3, 3) camera intrinsic matrix K.
+            T_cam_radar: (4, 4) transform: camera <- world.
+            radar_rcs: Optional (N,) RCS values for coloring.
+            output_path: If set, save the overlay image.
+
+        Returns:
+            (H, W, 3) uint8 overlay image.
+        """
+        H, W = rgb_image.shape[:2]
+
+        if len(radar_points) == 0:
+            return rgb_image.copy()
+
+        # Transform radar points to camera frame
+        pts_hom = np.column_stack([radar_points, np.ones(len(radar_points))])
+        pts_cam = (T_cam_radar @ pts_hom.T).T[:, :3]
+
+        # Filter: keep only points in front of camera
+        mask = pts_cam[:, 2] > 0.5
+        pts_cam = pts_cam[mask]
+
+        if radar_rcs is not None:
+            rcs = radar_rcs[mask]
+        else:
+            rcs = np.ones(len(pts_cam))
+
+        if len(pts_cam) == 0:
+            return rgb_image.copy()
+
+        # Project to pixel coordinates
+        px = intrinsics[0, 0] * pts_cam[:, 0] / pts_cam[:, 2] + intrinsics[0, 2]
+        py = intrinsics[1, 1] * pts_cam[:, 1] / pts_cam[:, 2] + intrinsics[1, 2]
+
+        # Filter to image bounds
+        in_bounds = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+        px = px[in_bounds]
+        py = py[in_bounds]
+        rcs = rcs[in_bounds]
+
+        if len(rcs) == 0:
+            return rgb_image.copy()
+
+        # Create overlay
+        fig, ax = plt.subplots(1, 1, figsize=(W / self.dpi, H / self.dpi), dpi=self.dpi)
+        ax.imshow(rgb_image)
+        scatter = ax.scatter(
+            px, py,
+            c=rcs,
+            cmap="plasma",
+            s=self.point_size * 20,
+            marker="D",
+            alpha=0.9,
+            edgecolors="white",
+            linewidths=0.5,
+        )
+        plt.colorbar(scatter, ax=ax, label="RCS", shrink=0.7)
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        ax.set_axis_off()
+        ax.set_title("Radar → Camera Fusion Overlay", fontsize=10)
+        fig.tight_layout(pad=0.5)
+
+        fig.canvas.draw()
+        overlay = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+        plt.close(fig)
+
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+            Image.fromarray(overlay).save(output_path)
+
+        return overlay
+
+    def overlay_radar_velocity_on_image(
+        self,
+        rgb_image: np.ndarray,
+        radar_points: np.ndarray,
+        intrinsics: np.ndarray,
+        T_cam_world: np.ndarray,
+        radial_velocity: np.ndarray,
+        output_path: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        Project radar detections onto a camera image, colored by radial velocity.
+
+        Uses a diverging colormap (RdBu_r): red = approaching, blue = receding,
+        white = near-zero relative velocity.
+
+        Args:
+            rgb_image: (H, W, 3) uint8 camera image.
+            radar_points: (N, 3) radar points in world frame.
+            intrinsics: (3, 3) camera intrinsic matrix K.
+            T_cam_world: (4, 4) transform: camera <- world.
+            radial_velocity: (N,) radial velocity values [m/s].
+            output_path: If set, save the overlay image.
+
+        Returns:
+            (H, W, 3) uint8 overlay image.
+        """
+        H, W = rgb_image.shape[:2]
+
+        if len(radar_points) == 0:
+            return rgb_image.copy()
+
+        pts_hom = np.column_stack([radar_points, np.ones(len(radar_points))])
+        pts_cam = (T_cam_world @ pts_hom.T).T[:, :3]
+
+        mask = pts_cam[:, 2] > 0.5
+        pts_cam = pts_cam[mask]
+        vel = radial_velocity[mask]
+
+        if len(pts_cam) == 0:
+            return rgb_image.copy()
+
+        px = intrinsics[0, 0] * pts_cam[:, 0] / pts_cam[:, 2] + intrinsics[0, 2]
+        py = intrinsics[1, 1] * pts_cam[:, 1] / pts_cam[:, 2] + intrinsics[1, 2]
+
+        in_bounds = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+        px = px[in_bounds]
+        py = py[in_bounds]
+        vel = vel[in_bounds]
+
+        if len(vel) == 0:
+            return rgb_image.copy()
+
+        # Symmetric velocity range for diverging colormap
+        v_max = max(np.abs(vel).max(), 1.0)
+
+        fig, ax = plt.subplots(1, 1, figsize=(W / self.dpi, H / self.dpi), dpi=self.dpi)
+        ax.imshow(rgb_image)
+        scatter = ax.scatter(
+            px, py,
+            c=vel,
+            cmap="RdBu_r",
+            vmin=-v_max, vmax=v_max,
+            s=self.point_size * 20,
+            marker="D",
+            alpha=0.9,
+            edgecolors="white",
+            linewidths=0.5,
+        )
+        plt.colorbar(scatter, ax=ax, label="Radial Velocity (m/s)", shrink=0.7)
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        ax.set_axis_off()
+        ax.set_title("Radar Doppler → Camera Overlay", fontsize=10)
+        fig.tight_layout(pad=0.5)
+
+        fig.canvas.draw()
+        overlay = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+        plt.close(fig)
+
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+            Image.fromarray(overlay).save(output_path)
+
+        return overlay
+
+    def render_bev_velocity(
+        self,
+        lidar_points: np.ndarray,
+        lidar_intensity: Optional[np.ndarray] = None,
+        radar_points: Optional[np.ndarray] = None,
+        radial_velocity: Optional[np.ndarray] = None,
+        x_range: tuple[float, float] = (-40, 40),
+        y_range: tuple[float, float] = (-40, 40),
+        ego_position: Optional[np.ndarray] = None,
+        output_path: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        BEV with radar detections colored by radial velocity.
+
+        LiDAR shown as faint background, radar as diamonds colored by
+        Doppler velocity (RdBu_r: red = approaching, blue = receding).
+
+        Args:
+            lidar_points: (N, 3) LiDAR points.
+            lidar_intensity: Optional (N,) LiDAR intensity.
+            radar_points: (N, 3) radar detections.
+            radial_velocity: (N,) radial velocity [m/s].
+            x_range: BEV x-axis range.
+            y_range: BEV y-axis range.
+            ego_position: (3,) ego position to center view.
+            output_path: Optional save path.
+
+        Returns:
+            Rendered BEV image as numpy array.
+        """
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=self.dpi)
+
+        # LiDAR background
+        pts = lidar_points.copy()
+        if ego_position is not None:
+            pts = pts - ego_position
+        l_mask = (
+            (pts[:, 0] > x_range[0]) & (pts[:, 0] < x_range[1]) &
+            (pts[:, 1] > y_range[0]) & (pts[:, 1] < y_range[1])
+        )
+        l_colors = lidar_intensity[l_mask] if lidar_intensity is not None else pts[l_mask, 2]
+        ax.scatter(
+            pts[l_mask, 0], pts[l_mask, 1],
+            c=l_colors, cmap="gray", s=0.3, alpha=0.3, edgecolors="none",
+        )
+
+        # Ego vehicle
+        ego_rect = plt.Rectangle((-2, -1), 4, 2, fill=True,
+                                  facecolor="red", alpha=0.5, edgecolor="red")
+        ax.add_patch(ego_rect)
+        ax.plot(0, 0, "r+", markersize=10, markeredgewidth=2)
+
+        # Radar colored by velocity
+        if radar_points is not None and len(radar_points) > 0 and radial_velocity is not None:
+            r_pts = radar_points.copy()
+            if ego_position is not None:
+                r_pts = r_pts - ego_position
+            r_mask = (
+                (np.abs(r_pts[:, 0]) < x_range[1]) &
+                (np.abs(r_pts[:, 1]) < y_range[1])
+            )
+            if r_mask.sum() > 0:
+                vel = radial_velocity[r_mask]
+                v_max = max(np.abs(vel).max(), 1.0)
+                sc = ax.scatter(
+                    r_pts[r_mask, 0], r_pts[r_mask, 1],
+                    c=vel, cmap="RdBu_r", vmin=-v_max, vmax=v_max,
+                    s=30, marker="D", alpha=0.9,
+                    edgecolors="white", linewidths=0.5,
+                )
+                plt.colorbar(sc, ax=ax, label="Radial Velocity (m/s)", shrink=0.7)
+
+        ax.set_xlim(x_range)
+        ax.set_ylim(y_range)
+        ax.set_aspect("equal")
+        ax.set_xlabel("X (forward) [m]")
+        ax.set_ylabel("Y (left) [m]")
+        ax.set_title("BEV - Radar Doppler Velocity", fontsize=10)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        fig.canvas.draw()
+        result = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+        plt.close(fig)
+
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+            Image.fromarray(result).save(output_path)
+
+        return result
+
     def render_depth_comparison(
         self,
         pred_depth: np.ndarray,
@@ -264,6 +533,8 @@ class FusionOverlay:
         y_range: tuple[float, float] = (-40, 40),
         resolution: float = 0.1,
         ego_position: Optional[np.ndarray] = None,
+        radar_points: Optional[np.ndarray] = None,
+        radar_rcs: Optional[np.ndarray] = None,
         output_path: Optional[str] = None,
     ) -> np.ndarray:
         """
@@ -276,6 +547,8 @@ class FusionOverlay:
             y_range: (min, max) y-axis range in meters.
             resolution: Grid cell size in meters.
             ego_position: Optional (3,) ego position to center the view.
+            radar_points: Optional (N, 3) radar detections to overlay.
+            radar_rcs: Optional (N,) RCS values for radar coloring.
             output_path: Optional save path.
 
         Returns:
@@ -312,12 +585,30 @@ class FusionOverlay:
         ax.add_patch(ego_rect)
         ax.plot(0, 0, "r+", markersize=10, markeredgewidth=2)
 
+        # Overlay radar detections
+        if radar_points is not None and len(radar_points) > 0:
+            r_pts = radar_points
+            if ego_position is not None:
+                r_pts = r_pts - ego_position
+            r_mask = (
+                (np.abs(r_pts[:, 0]) < x_range[1]) &
+                (np.abs(r_pts[:, 1]) < y_range[1])
+            )
+            r_colors = radar_rcs[r_mask] if radar_rcs is not None else r_pts[r_mask, 2]
+            ax.scatter(
+                r_pts[r_mask, 0], r_pts[r_mask, 1],
+                c=r_colors, cmap="plasma", s=25,
+                marker="D", alpha=0.9, edgecolors="white", linewidths=0.5,
+                label="Radar",
+            )
+            ax.legend(loc="upper right", fontsize=8)
+
         ax.set_xlim(x_range)
         ax.set_ylim(y_range)
         ax.set_aspect("equal")
         ax.set_xlabel("X (forward) [m]")
         ax.set_ylabel("Y (left) [m]")
-        ax.set_title("Bird's Eye View - LiDAR Point Cloud", fontsize=10)
+        ax.set_title("Bird's Eye View - LiDAR + Radar", fontsize=10)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
 
@@ -341,14 +632,16 @@ class FusionOverlay:
         intrinsics: np.ndarray,
         T_cam_world: np.ndarray,
         ego_position: np.ndarray,
+        radar_points: Optional[np.ndarray] = None,
+        radar_rcs: Optional[np.ndarray] = None,
         output_path: Optional[str] = None,
     ) -> np.ndarray:
         """
         Generate a comprehensive 4-panel visualization:
           1. Camera RGB
           2. Depth map
-          3. LiDAR-Camera overlay
-          4. BEV point cloud
+          3. LiDAR + Radar → Camera overlay
+          4. BEV point cloud (LiDAR + Radar)
 
         Args:
             rgb_image: (H, W, 3) camera image.
@@ -358,6 +651,8 @@ class FusionOverlay:
             intrinsics: (3, 3) camera K matrix.
             T_cam_world: (4, 4) camera-from-world transform.
             ego_position: (3,) ego position.
+            radar_points: Optional (N, 3) radar detections in world frame.
+            radar_rcs: Optional (N,) RCS values.
             output_path: Optional save path.
 
         Returns:
@@ -403,7 +698,27 @@ class FusionOverlay:
                 alpha=0.8, edgecolors="none",
             )
             plt.colorbar(sc, ax=axes[1, 0], shrink=0.7, label="Depth (m)")
-        axes[1, 0].set_title("LiDAR → Camera Fusion", fontsize=10)
+
+        # Overlay radar detections on fusion panel
+        if radar_points is not None and len(radar_points) > 0:
+            r_hom = np.column_stack([radar_points, np.ones(len(radar_points))])
+            r_cam = (T_cam_world @ r_hom.T).T[:, :3]
+            r_front = r_cam[:, 2] > 0.5
+            if r_front.sum() > 0:
+                r_pts = r_cam[r_front]
+                r_px = intrinsics[0, 0] * r_pts[:, 0] / r_pts[:, 2] + intrinsics[0, 2]
+                r_py = intrinsics[1, 1] * r_pts[:, 1] / r_pts[:, 2] + intrinsics[1, 2]
+                r_in = (r_px >= 0) & (r_px < W) & (r_py >= 0) & (r_py < H)
+                if r_in.sum() > 0:
+                    r_c = radar_rcs[r_front][r_in] if radar_rcs is not None else None
+                    axes[1, 0].scatter(
+                        r_px[r_in], r_py[r_in],
+                        c=r_c, cmap="plasma",
+                        s=self.point_size * 20, marker="D",
+                        alpha=0.9, edgecolors="white", linewidths=0.5,
+                    )
+
+        axes[1, 0].set_title("LiDAR + Radar → Camera Fusion", fontsize=10)
         axes[1, 0].set_axis_off()
 
         # Panel 4: BEV
@@ -421,10 +736,28 @@ class FusionOverlay:
         ego_rect = plt.Rectangle((-2, -1), 4, 2, fill=True,
                                   facecolor="red", alpha=0.5, edgecolor="red")
         axes[1, 1].add_patch(ego_rect)
+
+        # Overlay radar on BEV
+        if radar_points is not None and len(radar_points) > 0:
+            r_local = radar_points - ego_position
+            r_bev_mask = (
+                (np.abs(r_local[:, 0]) < bev_range) &
+                (np.abs(r_local[:, 1]) < bev_range)
+            )
+            if r_bev_mask.sum() > 0:
+                r_c = radar_rcs[r_bev_mask] if radar_rcs is not None else r_local[r_bev_mask, 2]
+                axes[1, 1].scatter(
+                    r_local[r_bev_mask, 0], r_local[r_bev_mask, 1],
+                    c=r_c, cmap="plasma", s=25,
+                    marker="D", alpha=0.9, edgecolors="white", linewidths=0.5,
+                    label="Radar",
+                )
+                axes[1, 1].legend(loc="upper right", fontsize=7)
+
         axes[1, 1].set_xlim(-bev_range, bev_range)
         axes[1, 1].set_ylim(-bev_range, bev_range)
         axes[1, 1].set_aspect("equal")
-        axes[1, 1].set_title("BEV Point Cloud", fontsize=10)
+        axes[1, 1].set_title("BEV - LiDAR + Radar", fontsize=10)
         axes[1, 1].grid(True, alpha=0.3)
 
         fig.suptitle(

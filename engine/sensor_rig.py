@@ -22,7 +22,9 @@ from tqdm import tqdm
 
 from .camera import VirtualCamera, GaussianSplatScene
 from .lidar import VirtualLiDAR
+from .radar import VirtualRadar
 from .trajectory import Trajectory, Pose
+from .actor import ScenarioManager
 
 
 @dataclass
@@ -61,19 +63,17 @@ class VirtualSensorRig:
         self,
         cameras: list[VirtualCamera],
         lidars: list[VirtualLiDAR],
+        radars: list[VirtualRadar],
         scene: GaussianSplatScene,
         config: dict,
+        scenario: Optional[ScenarioManager] = None,
     ):
         self.cameras = {cam.name: cam for cam in cameras}
         self.lidars = {lid.config.name: lid for lid in lidars}
+        self.radars = {rad.config.name: rad for rad in radars}
         self.scene = scene
         self.config = config
-
-        # Track radar placeholders
-        self.radar_configs = {}
-        for s in config.get("sensors", []):
-            if s["type"] == "radar":
-                self.radar_configs[s["name"]] = s
+        self.scenario = scenario
 
     @classmethod
     def from_config(
@@ -99,6 +99,7 @@ class VirtualSensorRig:
 
         cameras = []
         lidars = []
+        radars = []
 
         for sensor_cfg in config.get("sensors", []):
             stype = sensor_cfg["type"]
@@ -107,11 +108,12 @@ class VirtualSensorRig:
             elif stype == "lidar":
                 lidars.append(VirtualLiDAR.from_config(sensor_cfg, scene))
             elif stype == "radar":
-                pass  # Placeholder: radar not yet implemented
+                radars.append(VirtualRadar.from_config(sensor_cfg, scene))
             else:
                 raise ValueError(f"Unknown sensor type: {stype}")
 
-        return cls(cameras=cameras, lidars=lidars, scene=scene, config=config)
+        return cls(cameras=cameras, lidars=lidars, radars=radars,
+                   scene=scene, config=config)
 
     def render_frame(
         self,
@@ -119,7 +121,9 @@ class VirtualSensorRig:
         frame_idx: int = 0,
         render_cameras: bool = True,
         render_lidars: bool = True,
+        render_radars: bool = True,
         lidar_stochastic: bool = True,
+        ego_velocity: Optional[np.ndarray] = None,
     ) -> FrameOutput:
         """
         Render all sensors for a single ego pose.
@@ -129,7 +133,9 @@ class VirtualSensorRig:
             frame_idx: Frame sequence index.
             render_cameras: Whether to render camera sensors.
             render_lidars: Whether to render LiDAR sensors.
+            render_radars: Whether to render radar sensors.
             lidar_stochastic: Whether to apply Monte Carlo ray dropping.
+            ego_velocity: (3,) ego velocity in world frame for Doppler.
 
         Returns:
             FrameOutput containing all sensor data.
@@ -142,33 +148,88 @@ class VirtualSensorRig:
 
         T_wv = ego_pose.T
 
-        if render_cameras:
+        # Inject dynamic actors into scene if scenario is present
+        actor_infos = []  # [(center, velocity, radius), ...] for radar Doppler
+        if self.scenario is not None:
+            transformed_actors = self.scenario.get_actors_at(ego_pose.timestamp)
+            if transformed_actors:
+                merged_scene = self.scene.merge_actors(transformed_actors)
+                actor_infos = [
+                    (a.center, a.velocity, a.radius) for a in transformed_actors
+                ]
+            else:
+                merged_scene = self.scene
+        else:
+            merged_scene = self.scene
+
+        # Temporarily swap scene for all sensors
+        original_scenes = {}
+        if merged_scene is not self.scene:
             for name, cam in self.cameras.items():
-                t0 = time.perf_counter()
-                data = cam.render(T_wv, return_depth=True)
-                dt = (time.perf_counter() - t0) * 1000
-
-                frame.sensor_outputs[name] = SensorOutput(
-                    sensor_name=name,
-                    sensor_type="camera",
-                    timestamp=ego_pose.timestamp,
-                    data=data,
-                    render_time_ms=dt,
-                )
-
-        if render_lidars:
+                original_scenes[('cam', name)] = cam.scene
+                cam.scene = merged_scene
             for name, lidar in self.lidars.items():
-                t0 = time.perf_counter()
-                data = lidar.render(T_wv, stochastic=lidar_stochastic)
-                dt = (time.perf_counter() - t0) * 1000
+                original_scenes[('lidar', name)] = lidar.scene
+                lidar.scene = merged_scene
+            for name, radar in self.radars.items():
+                original_scenes[('radar', name)] = radar.scene
+                radar.scene = merged_scene
 
-                frame.sensor_outputs[name] = SensorOutput(
-                    sensor_name=name,
-                    sensor_type="lidar",
-                    timestamp=ego_pose.timestamp,
-                    data=data,
-                    render_time_ms=dt,
-                )
+        try:
+            if render_cameras:
+                for name, cam in self.cameras.items():
+                    t0 = time.perf_counter()
+                    data = cam.render(T_wv, return_depth=True)
+                    dt = (time.perf_counter() - t0) * 1000
+
+                    frame.sensor_outputs[name] = SensorOutput(
+                        sensor_name=name,
+                        sensor_type="camera",
+                        timestamp=ego_pose.timestamp,
+                        data=data,
+                        render_time_ms=dt,
+                    )
+
+            if render_lidars:
+                for name, lidar in self.lidars.items():
+                    t0 = time.perf_counter()
+                    data = lidar.render(T_wv, stochastic=lidar_stochastic)
+                    dt = (time.perf_counter() - t0) * 1000
+
+                    frame.sensor_outputs[name] = SensorOutput(
+                        sensor_name=name,
+                        sensor_type="lidar",
+                        timestamp=ego_pose.timestamp,
+                        data=data,
+                        render_time_ms=dt,
+                    )
+
+            if render_radars:
+                for name, radar in self.radars.items():
+                    t0 = time.perf_counter()
+                    data = radar.render(
+                        T_wv,
+                        ego_velocity=ego_velocity,
+                        actor_velocities=actor_infos if actor_infos else None,
+                    )
+                    dt = (time.perf_counter() - t0) * 1000
+
+                    frame.sensor_outputs[name] = SensorOutput(
+                        sensor_name=name,
+                        sensor_type="radar",
+                        timestamp=ego_pose.timestamp,
+                        data=data,
+                        render_time_ms=dt,
+                    )
+        finally:
+            # Restore original scene references
+            for (stype, name), orig_scene in original_scenes.items():
+                if stype == 'cam':
+                    self.cameras[name].scene = orig_scene
+                elif stype == 'lidar':
+                    self.lidars[name].scene = orig_scene
+                elif stype == 'radar':
+                    self.radars[name].scene = orig_scene
 
         return frame
 
@@ -178,6 +239,7 @@ class VirtualSensorRig:
         output_dir: Optional[str] = None,
         render_cameras: bool = True,
         render_lidars: bool = True,
+        render_radars: bool = True,
         lidar_stochastic: bool = True,
         save_format: str = "kitti",
         verbose: bool = True,
@@ -193,6 +255,7 @@ class VirtualSensorRig:
             output_dir: If set, save outputs to this directory.
             render_cameras: Render camera sensors.
             render_lidars: Render LiDAR sensors.
+            render_radars: Render radar sensors.
             lidar_stochastic: Apply stochastic ray dropping.
             save_format: Output format ("kitti" or "raw").
             verbose: Show progress bar.
@@ -204,11 +267,13 @@ class VirtualSensorRig:
             output_dir/
             ├── image_00/         # front_camera RGB
             │   ├── 000000.png
-            │   ├── 000001.png
             │   └── ...
             ├── depth_00/         # front_camera depth
             │   └── ...
             ├── velodyne/         # LiDAR point clouds
+            │   ├── 000000.bin
+            │   └── ...
+            ├── radar_00/         # Radar detections (x,y,z,rcs,v_radial)
             │   ├── 000000.bin
             │   └── ...
             ├── poses.txt         # Ego poses (KITTI format)
@@ -228,15 +293,40 @@ class VirtualSensorRig:
                 unit="frame",
             )
 
-        timing_stats = {"camera_ms": [], "lidar_ms": []}
+        timing_stats = {"camera_ms": [], "lidar_ms": [], "radar_ms": []}
+
+        # Pre-compute ego velocities from trajectory (finite difference)
+        poses_list = list(trajectory)
+        ego_velocities = []
+        for i in range(len(poses_list)):
+            if i == 0 and len(poses_list) > 1:
+                dt = poses_list[1].timestamp - poses_list[0].timestamp
+                if dt > 0:
+                    dp = poses_list[1].T[:3, 3] - poses_list[0].T[:3, 3]
+                    ego_velocities.append(dp / dt)
+                else:
+                    ego_velocities.append(np.zeros(3))
+            elif i > 0:
+                dt = poses_list[i].timestamp - poses_list[i-1].timestamp
+                if dt > 0:
+                    dp = poses_list[i].T[:3, 3] - poses_list[i-1].T[:3, 3]
+                    ego_velocities.append(dp / dt)
+                else:
+                    ego_velocities.append(np.zeros(3))
+            else:
+                ego_velocities.append(np.zeros(3))
 
         for idx, pose in iterator:
+            ego_vel = ego_velocities[idx] if idx < len(ego_velocities) else np.zeros(3)
+
             frame = self.render_frame(
                 ego_pose=pose,
                 frame_idx=idx,
                 render_cameras=render_cameras,
                 render_lidars=render_lidars,
+                render_radars=render_radars,
                 lidar_stochastic=lidar_stochastic,
+                ego_velocity=ego_vel,
             )
             frames.append(frame)
 
@@ -246,6 +336,8 @@ class VirtualSensorRig:
                     timing_stats["camera_ms"].append(so.render_time_ms)
                 elif so.sensor_type == "lidar":
                     timing_stats["lidar_ms"].append(so.render_time_ms)
+                elif so.sensor_type == "radar":
+                    timing_stats["radar_ms"].append(so.render_time_ms)
 
             # Save to disk
             if out_path:
@@ -302,6 +394,32 @@ class VirtualSensorRig:
                     str(pcd_dir / f"{frame_id}.pcd"),
                     data["points"],
                     data["intensity"],
+                )
+
+        for radar_idx, (name, radar) in enumerate(self.radars.items()):
+            if name not in frame.sensor_outputs:
+                continue
+            data = frame.sensor_outputs[name].data
+
+            if data["n_valid_points"] > 0:
+                # Save binary (x, y, z, rcs, v_radial)
+                radar_dir = out_path / f"radar_{radar_idx:02d}"
+                radar_dir.mkdir(parents=True, exist_ok=True)
+                VirtualRadar.save_radar_bin(
+                    str(radar_dir / f"{frame_id}.bin"),
+                    data["points"],
+                    data["rcs"],
+                    data["radial_velocity"],
+                )
+
+                # Also save PCD
+                radar_pcd_dir = out_path / f"radar_pcd_{radar_idx:02d}"
+                radar_pcd_dir.mkdir(parents=True, exist_ok=True)
+                VirtualRadar.save_radar_pcd(
+                    str(radar_pcd_dir / f"{frame_id}.pcd"),
+                    data["points"],
+                    data["rcs"],
+                    data["radial_velocity"],
                 )
 
     def _save_metadata(self, out_path: Path, trajectory: Trajectory, timing: dict):
@@ -365,7 +483,7 @@ class VirtualSensorRig:
     def sensor_names(self) -> list[str]:
         """List all sensor names in the rig."""
         names = list(self.cameras.keys()) + list(self.lidars.keys())
-        names += list(self.radar_configs.keys())
+        names += list(self.radars.keys())
         return names
 
     def __repr__(self) -> str:
@@ -373,5 +491,5 @@ class VirtualSensorRig:
             f"VirtualSensorRig("
             f"cameras={list(self.cameras.keys())}, "
             f"lidars={list(self.lidars.keys())}, "
-            f"radar={list(self.radar_configs.keys())})"
+            f"radars={list(self.radars.keys())})"
         )

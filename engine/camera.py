@@ -270,6 +270,54 @@ class GaussianSplatScene:
             device=device,
         )
 
+    def merge_actors(self, actor_list) -> "GaussianSplatScene":
+        """
+        Merge transformed actor Gaussians with this background scene.
+
+        Returns a new GaussianSplatScene with concatenated Gaussians.
+        Does NOT modify the original scene.
+
+        Args:
+            actor_list: List of TransformedActor (from actor.py).
+
+        Returns:
+            New GaussianSplatScene with background + actor Gaussians.
+        """
+        if not actor_list:
+            return self
+
+        all_means = [self.means]
+        all_scales = [self.scales]
+        all_rotations = [self.rotations]
+        all_opacities = [self.opacities]
+        all_sh = [self.sh_coeffs]
+
+        for actor in actor_list:
+            all_means.append(actor.means)
+            all_scales.append(actor.scales)
+            all_rotations.append(actor.rotations)
+            all_opacities.append(actor.opacities)
+            # Pad SH coefficients to match background if needed
+            actor_sh = actor.sh_coeffs
+            if actor_sh.shape[1] != self.sh_coeffs.shape[1]:
+                n_actor = actor_sh.shape[0]
+                n_sh_bg = self.sh_coeffs.shape[1]
+                padded = torch.zeros(n_actor, n_sh_bg, 3, device=self.device)
+                n_copy = min(actor_sh.shape[1], n_sh_bg)
+                padded[:, :n_copy, :] = actor_sh[:, :n_copy, :]
+                actor_sh = padded
+            all_sh.append(actor_sh)
+
+        return GaussianSplatScene(
+            means=torch.cat(all_means, dim=0),
+            scales=torch.cat(all_scales, dim=0),
+            rotations=torch.cat(all_rotations, dim=0),
+            opacities=torch.cat(all_opacities, dim=0),
+            sh_coeffs=torch.cat(all_sh, dim=0),
+            sh_degree=self.sh_degree,
+            device=str(self.device),
+        )
+
 
 class VirtualCamera:
     """

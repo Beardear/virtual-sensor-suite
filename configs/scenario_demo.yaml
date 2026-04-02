@@ -1,0 +1,44 @@
+# Demo Scenario: Dynamic actors for sensor simulation testing
+# Coordinate convention: x-forward, y-left, z-up (vehicle frame)
+
+actors:
+  - name: oncoming_car
+    type: vehicle
+    dimensions: [4.5, 1.8, 1.5]    # length, width, height (meters)
+    color: [0.6, 0.1, 0.1]          # dark red
+    trajectory:
+      type: linear
+      start: [40.0, -3.0, 0.0]      # starts 40m ahead, right lane
+      velocity: [-15.0, 0.0, 0.0]   # approaching ego at 15 m/s
+
+  - name: lead_car
+    type: vehicle
+    dimensions: [4.0, 1.8, 1.4]
+    color: [0.2, 0.2, 0.7]          # blue
+    trajectory:
+      type: linear
+      start: [25.0, 0.0, 0.0]       # 25m ahead, same lane
+      velocity: [8.0, 0.0, 0.0]     # slower than ego (ego at 10 m/s)
+
+  - name: parked_car
+    type: vehicle
+    dimensions: [4.0, 1.8, 1.4]
+    color: [0.3, 0.3, 0.6]          # grey-blue
+    trajectory:
+      type: static
+      position: [20.0, 5.0, 0.0]    # parked on left side
+      yaw: 0.0
+
+  - name: crossing_pedestrian
+    type: pedestrian
+    dimensions: [0.5, 0.5, 1.7]
+    color: [0.8, 0.6, 0.4]
+    trajectory:
+      type: linear
+      start: [15.0, -6.0, 0.0]      # right sidewalk
+      velocity: [0.0, 1.5, 0.0]     # crossing road leftward at 1.5 m/s
+
+auto_traffic:
+  enabled: false
+  n_vehicles: 5
+  speed_range: [5.0, 20.0]
