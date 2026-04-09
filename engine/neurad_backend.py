@@ -248,6 +248,150 @@ class NeuradBackend:
             "ray_drop_prob": ray_drop_prob,
         }
 
+    def inject_actors(self, actors, suppress_margin=2.0):
+        """
+        Temporarily inject dynamic actor Gaussians into the model.
+
+        Suppresses background Gaussians inside actor bounding boxes and
+        concatenates actor Gaussians to the model's gauss_params. Call
+        restore_actors() after rendering to undo.
+
+        Args:
+            actors: List of TransformedActor from actor.py. Actor positions
+                    must be in the SCENE coordinate frame (post dataparser
+                    transform + scale). Use world_to_scene() to convert.
+            suppress_margin: Extra margin (meters in scene frame) around
+                             actor AABBs for background suppression.
+        """
+        model = self.model
+        device = next(model.parameters()).device
+
+        # Save original parameters
+        self._saved_params = {
+            key: param.data.clone()
+            for key, param in model.gauss_params.items()
+        }
+
+        if not actors:
+            return
+
+        # 1. Suppress background Gaussians inside actor bounding boxes
+        bg_opacities = model.gauss_params["opacities"].data.clone()
+        for actor in actors:
+            center = torch.tensor(actor.center, dtype=torch.float32, device=device)
+            half_ext = torch.tensor(
+                actor.dimensions, dtype=torch.float32, device=device
+            ) / 2.0 + suppress_margin
+            inside = (
+                (model.gauss_params["means"].data - center).abs() < half_ext
+            ).all(dim=1)
+            # Set logit-opacity to large negative (sigmoid -> ~0)
+            bg_opacities[inside] = -10.0
+
+        model.gauss_params["opacities"].data = bg_opacities
+
+        # 2. Build actor Gaussian params matching model format
+        n_existing = model.num_points
+        feature_dim = model.gauss_params["features_rest"].shape[1]
+        # Use the highest static ID (last actor group) + 1 for injected actors
+        max_id = model.gauss_params["id"].data.max().item()
+
+        actor_means_list = []
+        actor_scales_list = []
+        actor_quats_list = []
+        actor_opacities_list = []
+        actor_features_dc_list = []
+        actor_features_rest_list = []
+        actor_ids_list = []
+
+        for actor in actors:
+            n_a = actor.means.shape[0]
+            actor_means_list.append(actor.means.to(device))
+            actor_scales_list.append(actor.scales.to(device))
+
+            # Convert [w,x,y,z] quaternion to model format
+            # SplatAD uses [w,x,y,z] via fused_to_skip in gsplat
+            actor_quats_list.append(actor.rotations.to(device))
+
+            # Opacities stored as logits in the model
+            actor_opacities_list.append(
+                torch.logit(actor.opacities.to(device).clamp(1e-4, 1 - 1e-4))
+            )
+
+            # features_dc: use SH DC term as base color (N, 3)
+            C0 = 0.28209479177387814
+            base_color = C0 * actor.sh_coeffs[:, 0, :] + 0.5  # (N, 3)
+            actor_features_dc_list.append(base_color.to(device))
+
+            # features_rest: zero (no learned features for injected actors)
+            actor_features_rest_list.append(
+                torch.zeros(n_a, feature_dim, device=device)
+            )
+
+            # ID: static group (highest ID)
+            actor_ids_list.append(
+                torch.full((n_a, 1), max_id, device=device)
+            )
+
+        # 3. Concatenate actor params with existing params
+        for key, actor_tensors in [
+            ("means", actor_means_list),
+            ("scales", actor_scales_list),
+            ("quats", actor_quats_list),
+            ("opacities", actor_opacities_list),
+            ("features_dc", actor_features_dc_list),
+            ("features_rest", actor_features_rest_list),
+            ("id", actor_ids_list),
+        ]:
+            if actor_tensors:
+                combined = torch.cat(
+                    [model.gauss_params[key].data] + actor_tensors, dim=0
+                )
+                model.gauss_params[key] = torch.nn.Parameter(combined)
+
+        self._n_injected = sum(a.means.shape[0] for a in actors)
+
+    def restore_actors(self):
+        """Restore original model parameters after actor injection."""
+        if not hasattr(self, '_saved_params') or self._saved_params is None:
+            return
+        model = self.model
+        for key, saved_data in self._saved_params.items():
+            model.gauss_params[key] = torch.nn.Parameter(saved_data)
+        self._saved_params = None
+        self._n_injected = 0
+
+    def world_to_scene(self, position_world):
+        """
+        Convert a position from the original world frame to the model's
+        scene frame (post dataparser transform + scale).
+
+        Args:
+            position_world: (3,) numpy array in original world coordinates.
+
+        Returns:
+            (3,) numpy array in scene coordinates.
+        """
+        pos_h = np.append(position_world, 1.0)
+        return (self._w2s @ pos_h)[:3]
+
+    def render_train_camera_with_actors(self, frame_idx, actors):
+        """
+        Render a training camera view with injected dynamic actors.
+
+        Args:
+            frame_idx: Training camera index.
+            actors: List of TransformedActor (positions in scene frame).
+
+        Returns:
+            dict with 'rgb', 'depth', 'alpha'.
+        """
+        self.inject_actors(actors)
+        try:
+            return self.render_train_camera(frame_idx)
+        finally:
+            self.restore_actors()
+
     def get_train_lidar_count(self) -> int:
         """Number of training LiDAR scans."""
         if not self._has_lidar:

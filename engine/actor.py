@@ -34,6 +34,7 @@ class TransformedActor:
     velocity: np.ndarray       # (3,) world-frame velocity
     center: np.ndarray         # (3,) world-frame center position
     radius: float              # bounding radius for Doppler assignment
+    dimensions: np.ndarray     # (3,) [length, width, height] for AABB suppression
 
 
 class ActorGaussians:
@@ -122,13 +123,15 @@ class ActorGaussians:
         means = torch.cat([body_means, roof_means, wheel_means], dim=0)
         n_total = means.shape[0]
 
-        # Scales: body is flat-ish, roof thinner, wheels small
-        body_scales = torch.tensor([0.15, 0.08, 0.06]).expand(n_body, -1) + \
-                      torch.randn(n_body, 3).abs() * 0.02
-        roof_scales = torch.tensor([0.12, 0.07, 0.04]).expand(n_roof, -1) + \
-                      torch.randn(n_roof, 3).abs() * 0.02
-        wheel_scales = torch.tensor([0.06, 0.06, 0.06]).expand(wheel_means.shape[0], -1) + \
-                       torch.randn(wheel_means.shape[0], 3).abs() * 0.01
+        # Scales: body is flat-ish, roof thinner, wheels small.
+        # Scales must be large enough for LiDAR ray-casting to detect
+        # (rays need to pass within ~3*scale of a Gaussian center).
+        body_scales = torch.tensor([0.35, 0.20, 0.15]).expand(n_body, -1) + \
+                      torch.randn(n_body, 3).abs() * 0.03
+        roof_scales = torch.tensor([0.30, 0.18, 0.10]).expand(n_roof, -1) + \
+                      torch.randn(n_roof, 3).abs() * 0.03
+        wheel_scales = torch.tensor([0.15, 0.15, 0.15]).expand(wheel_means.shape[0], -1) + \
+                       torch.randn(wheel_means.shape[0], 3).abs() * 0.02
         scales = torch.cat([body_scales, roof_scales, wheel_scales], dim=0).log()
 
         # Rotations: identity + small noise
@@ -172,8 +175,8 @@ class ActorGaussians:
         means[:, 1] = torch.randn(n_gaussians) * width * 0.3
         means[:, 2] = torch.rand(n_gaussians) * height
 
-        scales = torch.tensor([0.05, 0.05, 0.08]).expand(n_gaussians, -1) + \
-                 torch.randn(n_gaussians, 3).abs() * 0.01
+        scales = torch.tensor([0.12, 0.12, 0.18]).expand(n_gaussians, -1) + \
+                 torch.randn(n_gaussians, 3).abs() * 0.02
         scales = scales.log()
 
         rotations = torch.zeros(n_gaussians, 4)
@@ -238,6 +241,7 @@ class ActorGaussians:
             velocity=np.zeros(3),  # filled by ActorTrajectory
             center=center,
             radius=self.radius,
+            dimensions=np.array(self.dimensions, dtype=np.float64),
         )
 
 

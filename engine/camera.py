@@ -118,6 +118,8 @@ class GaussianSplatScene:
         self.sh_coeffs = sh_coeffs.to(self.device)   # (N, C, 3)
         self.sh_degree = sh_degree
         self.n_gaussians = means.shape[0]
+        self.n_background = means.shape[0]  # All Gaussians are background by default
+        self.actor_boxes = []  # List of (center, half_extents) for actor AABBs
 
     @classmethod
     def create_synthetic(
@@ -286,10 +288,20 @@ class GaussianSplatScene:
         if not actor_list:
             return self
 
+        # Suppress background Gaussians inside actor bounding boxes.
+        # Use generous margins so that rays approaching from any angle
+        # encounter a clear volume around the actor.
+        bg_opacities = self.opacities.clone()
+        for actor in actor_list:
+            center = torch.tensor(actor.center, dtype=torch.float32, device=self.device)
+            half_ext = torch.tensor(actor.dimensions, dtype=torch.float32, device=self.device) / 2.0 + 2.0
+            inside = ((self.means - center).abs() < half_ext).all(dim=1)
+            bg_opacities[inside] = 0.0
+
         all_means = [self.means]
         all_scales = [self.scales]
         all_rotations = [self.rotations]
-        all_opacities = [self.opacities]
+        all_opacities = [bg_opacities]
         all_sh = [self.sh_coeffs]
 
         for actor in actor_list:
@@ -308,7 +320,7 @@ class GaussianSplatScene:
                 actor_sh = padded
             all_sh.append(actor_sh)
 
-        return GaussianSplatScene(
+        merged = GaussianSplatScene(
             means=torch.cat(all_means, dim=0),
             scales=torch.cat(all_scales, dim=0),
             rotations=torch.cat(all_rotations, dim=0),
@@ -317,6 +329,12 @@ class GaussianSplatScene:
             sh_degree=self.sh_degree,
             device=str(self.device),
         )
+        merged.n_background = self.n_gaussians
+        merged.actor_boxes = [
+            (np.array(a.center), np.array(a.dimensions))
+            for a in actor_list
+        ]
+        return merged
 
 
 class VirtualCamera:
@@ -449,7 +467,8 @@ class VirtualCamera:
                     "viewmat": view_matrix.cpu().numpy(),
                 }
 
-            # Filter to valid Gaussians
+            # Filter to valid Gaussians (frustum + non-zero opacity)
+            valid_mask &= self.scene.opacities[:, 0] > 1e-3
             means_c = means_cam[valid_mask]  # (M, 3)
             depths_v = depths[valid_mask]
             scales_v = torch.exp(self.scene.scales[valid_mask])  # (M, 3)
@@ -517,8 +536,28 @@ class VirtualCamera:
             colors = colors.clamp(0.0, 1.0)
 
             # --- Step 4: Per-Gaussian splatting (vectorized) ---
-            # Sort by depth (front-to-back)
+            # Sort by depth (front-to-back), ensuring actors are always
+            # included in the rendering budget regardless of MAX_GAUSS.
             sort_idx = torch.argsort(depths_v)
+            M = means_c.shape[0]
+            MAX_BG = 2000  # Background Gaussian budget
+
+            # Build original-index mask for actors vs background.
+            # valid_mask was applied to scene Gaussians; map back to
+            # find which valid Gaussians are actors.
+            valid_indices = torch.where(valid_mask)[0]
+            is_actor_valid = valid_indices >= self.scene.n_background
+            is_actor_sorted = is_actor_valid[sort_idx]
+
+            # Select: top MAX_BG background Gaussians + all actor Gaussians
+            bg_sorted = torch.where(~is_actor_sorted)[0]
+            actor_sorted = torch.where(is_actor_sorted)[0]
+            bg_keep = bg_sorted[:MAX_BG]
+            selected = torch.cat([bg_keep, actor_sorted])
+            # Re-sort the selection by depth
+            selected = selected[torch.argsort(depths_v[sort_idx[selected]])]
+            sort_idx = sort_idx[selected]
+
             means_c = means_c[sort_idx]
             depths_v = depths_v[sort_idx]
             cov2d = cov2d[sort_idx]
@@ -547,9 +586,7 @@ class VirtualCamera:
             T_buffer = torch.ones(H, W, device=self.device)  # Transmittance
 
             # Per-Gaussian splatting: iterate over sorted Gaussians
-            # and splat each one onto its footprint in the image
-            M = means_c.shape[0]
-            MAX_GAUSS = min(M, 2000)  # Cap for performance
+            MAX_GAUSS = means_c.shape[0]
 
             for gi in range(MAX_GAUSS):
                 cx_g = px_sorted[gi]

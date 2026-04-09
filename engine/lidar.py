@@ -210,6 +210,8 @@ class VirtualLiDAR:
             # Distance from each Gaussian to chunk center
             dist_to_center = torch.norm(means - chunk_center, dim=1)  # (M,)
             coarse_mask = dist_to_center < cull_radius
+            # Filter out suppressed (zero-opacity) Gaussians
+            coarse_mask &= opacities[:, 0] > 1e-3
             if coarse_mask.sum() == 0:
                 continue
 
@@ -340,6 +342,37 @@ class VirtualLiDAR:
                 self.scene.sh_coeffs,
                 max_range=self.config.range_m,
             )
+
+            # Inject actor hits via ray-AABB intersection.
+            # The volumetric rendering can miss actors due to transmittance
+            # depletion from dense backgrounds, so we check explicitly.
+            actor_boxes = getattr(self.scene, 'actor_boxes', [])
+            for center, dims in actor_boxes:
+                half = torch.tensor(dims, dtype=torch.float32, device=self.device) / 2.0
+                box_min = torch.tensor(center, dtype=torch.float32, device=self.device) - half
+                box_max = torch.tensor(center, dtype=torch.float32, device=self.device) + half
+
+                # Slab method ray-AABB intersection
+                sign = torch.sign(ray_dirs_world)
+                sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+                safe_dirs = torch.where(ray_dirs_world.abs() < 1e-8,
+                                        sign * 1e-8, ray_dirs_world)
+                inv_dir = 1.0 / safe_dirs
+                t1 = (box_min - ray_origins_world) * inv_dir
+                t2 = (box_max - ray_origins_world) * inv_dir
+                t_near = torch.min(t1, t2)
+                t_far = torch.max(t1, t2)
+                t_enter = t_near.max(dim=1).values
+                t_exit = t_far.min(dim=1).values
+
+                box_hit = (t_enter < t_exit) & (t_exit > 0.5)
+                t_enter = t_enter.clamp(min=0.5)
+
+                # Actor AABB hits override background depths — actors are
+                # solid objects that should produce LiDAR returns.
+                depths[box_hit] = t_enter[box_hit]
+                intensities[box_hit] = 0.7
+                hit_mask[box_hit] = True
 
             # Range filter
             range_mask = (depths > 0.5) & (depths < self.config.range_m)
