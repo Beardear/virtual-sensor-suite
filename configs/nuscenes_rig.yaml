@@ -1,0 +1,228 @@
+# Virtual Sensor Rig Configuration - nuScenes Dataset
+# Full sensor layout: 6 surround cameras, 1 LiDAR, 5 radars
+# Calibration from nuScenes v1.0-trainval (representative vehicle)
+# Coordinate convention: x-right, y-forward, z-up (nuScenes ego frame)
+
+scene:
+  backend: "gaussian_splatting"
+  model_path: null
+  sh_degree: 3
+
+sensors:
+  # === CAMERAS (6x surround, 1600x900, ~12Hz) ===
+
+  - name: cam_front
+    type: camera
+    intrinsics:
+      fx: 1266.42
+      fy: 1266.42
+      cx: 816.27
+      cy: 491.51
+    extrinsics:
+      x: 1.7008
+      y: 0.0159
+      z: 1.5110
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    resolution: [1600, 900]
+    fov_deg: 70.0
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - name: cam_front_left
+    type: camera
+    intrinsics:
+      fx: 1272.60
+      fy: 1272.60
+      cx: 826.62
+      cy: 479.75
+    extrinsics:
+      x: 1.5239
+      y: 0.4946
+      z: 1.5093
+      roll: 0.0
+      pitch: 0.0
+      yaw: 55.0
+    resolution: [1600, 900]
+    fov_deg: 70.0
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - name: cam_front_right
+    type: camera
+    intrinsics:
+      fx: 1260.85
+      fy: 1260.85
+      cx: 807.97
+      cy: 495.33
+    extrinsics:
+      x: 1.5508
+      y: -0.4934
+      z: 1.4957
+      roll: 0.0
+      pitch: 0.0
+      yaw: -55.0
+    resolution: [1600, 900]
+    fov_deg: 70.0
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - name: cam_back
+    type: camera
+    intrinsics:
+      fx: 809.22
+      fy: 809.22
+      cx: 829.22
+      cy: 481.78
+    extrinsics:
+      x: 0.0283
+      y: 0.0035
+      z: 1.5791
+      roll: 0.0
+      pitch: 0.0
+      yaw: 180.0
+    resolution: [1600, 900]
+    fov_deg: 130.0
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - name: cam_back_left
+    type: camera
+    intrinsics:
+      fx: 1256.74
+      fy: 1256.74
+      cx: 792.11
+      cy: 492.78
+    extrinsics:
+      x: 1.0357
+      y: 0.4848
+      z: 1.5910
+      roll: 0.0
+      pitch: 0.0
+      yaw: 110.0
+    resolution: [1600, 900]
+    fov_deg: 70.0
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - name: cam_back_right
+    type: camera
+    intrinsics:
+      fx: 1259.51
+      fy: 1259.51
+      cx: 807.25
+      cy: 501.20
+    extrinsics:
+      x: 1.0149
+      y: -0.4806
+      z: 1.5624
+      roll: 0.0
+      pitch: 0.0
+      yaw: -110.0
+    resolution: [1600, 900]
+    fov_deg: 70.0
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # === LIDAR (1x rooftop, Velodyne HDL-32E, 32ch, ~20Hz) ===
+
+  - name: lidar_top
+    type: lidar
+    channels: 32
+    range_m: 70.0
+    points_per_channel: 1024
+    vertical_fov: [-30.67, 10.67]       # HDL-32E spec
+    horizontal_fov: [0.0, 360.0]
+    ray_drop_prob: 0.0
+    intensity_model: "learned"
+    extrinsics:
+      x: 0.9437
+      y: 0.0
+      z: 1.8402
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+
+  # === RADARS (5x Continental ARS 408-21, ~13Hz) ===
+
+  - name: radar_front
+    type: radar
+    extrinsics:
+      x: 3.412
+      y: 0.0
+      z: 0.5
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+    max_range_m: 250.0
+    azimuth_fov_deg: 60.0
+    elevation_fov_deg: 14.0
+    num_azimuth_bins: 64
+    num_elevation_bins: 8
+    rcs_model: "opacity_based"
+
+  - name: radar_front_left
+    type: radar
+    extrinsics:
+      x: 2.422
+      y: 0.8
+      z: 0.78
+      roll: 0.0
+      pitch: 0.0
+      yaw: 88.0
+    max_range_m: 250.0
+    azimuth_fov_deg: 60.0
+    elevation_fov_deg: 14.0
+    num_azimuth_bins: 64
+    num_elevation_bins: 8
+    rcs_model: "opacity_based"
+
+  - name: radar_front_right
+    type: radar
+    extrinsics:
+      x: 2.422
+      y: -0.8
+      z: 0.77
+      roll: 0.0
+      pitch: 0.0
+      yaw: -91.0
+    max_range_m: 250.0
+    azimuth_fov_deg: 60.0
+    elevation_fov_deg: 14.0
+    num_azimuth_bins: 64
+    num_elevation_bins: 8
+    rcs_model: "opacity_based"
+
+  - name: radar_back_left
+    type: radar
+    extrinsics:
+      x: -0.562
+      y: 0.628
+      z: 0.53
+      roll: 0.0
+      pitch: 0.0
+      yaw: 174.0
+    max_range_m: 250.0
+    azimuth_fov_deg: 60.0
+    elevation_fov_deg: 14.0
+    num_azimuth_bins: 64
+    num_elevation_bins: 8
+    rcs_model: "opacity_based"
+
+  - name: radar_back_right
+    type: radar
+    extrinsics:
+      x: -0.562
+      y: -0.618
+      z: 0.53
+      roll: 0.0
+      pitch: 0.0
+      yaw: -176.0
+    max_range_m: 250.0
+    azimuth_fov_deg: 60.0
+    elevation_fov_deg: 14.0
+    num_azimuth_bins: 64
+    num_elevation_bins: 8
+    rcs_model: "opacity_based"
+
+simulation:
+  output_format: "nuscenes"
+  save_depth: true
+  save_pointcloud: true
+  coordinate_frame: "ego"
+  timestamp_sync: true
